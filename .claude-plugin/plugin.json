@@ -1,0 +1,10 @@
+{
+  "name": "image-pane",
+  "version": "1.0.0",
+  "description": "讓 Claude Code 的 VS Code 面板直接顯示圖片，並同步傳到網頁版與手機",
+  "author": { "name": "LaiYueJi", "url": "https://github.com/LaiYueJi" },
+  "homepage": "https://github.com/LaiYueJi/image-pane",
+  "repository": "https://github.com/LaiYueJi/image-pane",
+  "license": "MIT",
+  "keywords": ["image", "vscode", "screenshot", "mod"]
+}

@@ -1,0 +1,5 @@
+{
+  "name": "image-pane",
+  "owner": { "name": "LaiYueJi" },
+  "plugins": [{ "name": "image-pane", "source": "./" }]
+}
