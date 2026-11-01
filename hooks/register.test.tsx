@@ -66,8 +66,7 @@ test('認得各種圖片的格式與尺寸', () => {
   expect(sniff(decodeBase64('QUJD'))).toBe(null)
 })
 
-test('小圖不呼叫任何外部工具，並同步傳到網頁版', async ($, on) => {
-  const sent: unknown[] = []
+test('小圖不呼叫任何外部工具', async ($, on) => {
   let processes = 0
   on('fs.exists', () => FILE_EXISTS)
   on('fs.read', () => ({ value: { base64: PNG } }))
@@ -76,29 +75,11 @@ test('小圖不呼叫任何外部工具，並同步傳到網頁版', async ($, o
     return ran('')
   })
   on('ui.invalidate', () => ({ value: undefined }))
-  on('tool.call', (_, e) => {
-    sent.push(e)
-    return { result: {} }
-  })
 
   const answer = await $.tool.call({ tool: TOOL, path: 'a.png', caption: '說明' } as never)
 
-  expect(String(answer.result)).toContain('網頁版已傳送')
   expect(String(answer.result)).toContain('1x1')
   expect(processes).toBe(0)
-  expect(sent[0]).toMatchObject({ tool: 'SendUserFile', files: ['a.png'], caption: '說明' })
-})
-
-test('網頁版傳不出去時本機仍然顯示', async ($, on) => {
-  on('fs.exists', () => FILE_EXISTS)
-  on('fs.read', () => ({ value: { base64: PNG } }))
-  on('ui.invalidate', () => ({ value: undefined }))
-  on('tool.call', () => ({ deny: '沒有這個工具' }))
-
-  const answer = await $.tool.call({ tool: TOOL, path: 'a.png' } as never)
-
-  expect(answer.deny).toBeUndefined()
-  expect(String(answer.result)).toContain('網頁版未傳送（沒有這個工具）')
 })
 
 test('大圖在 Windows 用 PowerShell 縮小', async ($, on) => {
@@ -111,7 +92,6 @@ test('大圖在 Windows 用 PowerShell 縮小', async ($, on) => {
     return ran(PNG)
   })
   on('ui.invalidate', () => ({ value: undefined }))
-  on('tool.call', () => ({ result: {} }))
 
   const answer = await $.tool.call({ tool: TOOL, path: 'big.png' } as never)
 
@@ -129,7 +109,6 @@ test('大圖在其他系統用 sh 縮小，太大就換更小的設定', async (
     return ran(argv.length === 1 ? TOO_BIG : PNG)
   })
   on('ui.invalidate', () => ({ value: undefined }))
-  on('tool.call', () => ({ result: {} }))
 
   const answer = await $.tool.call({ tool: TOOL, path: 'big.png' } as never)
 
@@ -185,7 +164,7 @@ for (const [system, value, expected] of [
     })
 
     const ui = await $.ui.mount(row(`call-open-${system}`, 'vscode'))
-    await ui.press({ key: 'open' })
+    await ui.press({ key: 'open:a.png' })
     for (let i = 0; i < 50 && runs.length < 1; i++) await Promise.resolve()
 
     expect(runs.length).toBe(1)
@@ -195,6 +174,55 @@ for (const [system, value, expected] of [
     await ui.unmount()
   })
 }
+
+test('SendUserFile 傳的圖片在 VS Code 畫成圖，其他檔案照舊', async ($, on) => {
+  on('fs.exists', () => FILE_EXISTS)
+  on('fs.read', () => ({ value: { base64: PNG } }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  const sent = (id: string, surface: 'vscode' | 'desktop', files: string[]) =>
+    ({
+      plugin: 'image-pane',
+      component: 'ToolUse',
+      requestId: id,
+      surface,
+      props: {
+        tool_use_id: id,
+        tool: 'SendUserFile',
+        input: { files, caption: '截圖', status: 'normal' },
+        isRunning: false,
+        isErrored: false,
+        isInterrupted: false,
+      },
+    }) as never
+
+  const picture = await $.ui.mount(sent('s1', 'vscode', ['shot.png', 'notes.txt']))
+  expect(String((await picture.find({ type: 'Svg' }))?.props.source)).toContain('data:image/png;base64,')
+  expect((await picture.find({ type: 'Text' }))?.text).toBe('截圖')
+  await picture.unmount()
+
+  for (const other of [sent('s2', 'vscode', ['report.pdf']), sent('s3', 'desktop', ['shot.png'])]) {
+    const ui = await $.ui.mount(other)
+    expect((await ui.find({ type: 'Text' }))?.text).toBe('engine')
+    await ui.unmount()
+  }
+})
+
+test('原檔不見了就回到原本的工具列', async ($, on) => {
+  on('fs.exists', () => ({ value: false }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+
+  const ui = await $.ui.mount(row('gone', 'vscode', { tool: 'SendUserFile', input: { files: ['gone.png'] } }))
+
+  expect(await ui.find({ type: 'Svg' })).toBeUndefined()
+  expect((await ui.find({ type: 'Text' }))?.text).toBe('engine')
+  await ui.unmount()
+})
 
 test('終端機與別的工具都留給原本的畫法', async ($, on) => {
   on('ui.render', ($, e) => {

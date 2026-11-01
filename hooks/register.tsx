@@ -5,6 +5,8 @@ import { decodeBase64, sniff } from './image'
 const PANE = 'image-pane'
 const TOOL_NAME = 'show_image'
 const TOOL = 'mcp__image-pane__show_image'
+const SEND_FILE = 'SendUserFile'
+const IMAGE_FILE = /\.(png|jpe?g|gif|bmp|webp|svg)$/i
 // Svg 的 source 上限是 131072 字元，預留外層標籤的空間
 const SVG_LIMIT = 131072
 const BASE64_LIMIT = 130000
@@ -186,40 +188,35 @@ async function load($: EngineInterface, path: string, caption: string): Promise<
   return shown
 }
 
-// mod 畫的東西到不了網頁版與手機，那邊只收得到 SendUserFile 傳的檔；傳不出去不影響本機顯示
-async function sendToRemote($: EngineInterface, path: string, caption: string): Promise<string> {
-  try {
-    const sent = (await $.tool.call({
-      tool: 'SendUserFile',
-      files: [path],
-      status: 'normal',
-      ...(caption ? { caption } : {}),
-    } as never)) as { deny?: string; isError?: boolean }
-    if (sent.deny) return `網頁版未傳送（${sent.deny}）`
-    return sent.isError ? '網頁版未傳送（工具回報錯誤）' : '網頁版已傳送'
-  } catch (err) {
-    return `網頁版未傳送（${messageOf(err)}）`
-  }
-}
-
 function readInput(input: unknown) {
-  const { path, caption } = (input ?? {}) as { path?: unknown; caption?: unknown }
+  const { path, caption, files } = (input ?? {}) as { path?: unknown; caption?: unknown; files?: unknown }
   return {
     path: typeof path === 'string' ? path : '',
     caption: typeof caption === 'string' ? caption : '',
+    files: Array.isArray(files) ? files.filter((file): file is string => typeof file === 'string') : [],
   }
 }
 
-// 依工具呼叫記下要畫的圖；重開對話後從當時的路徑重新載入，失敗就記 null 不再重試
-const byCall = new Map<string, Promise<Shown | null>>()
+// 依工具呼叫與路徑記下要畫的圖；重開對話後從當時的路徑重新載入，失敗就記 null 不再重試
+const loaded = new Map<string, Promise<Shown | null>>()
 let latest: Shown | undefined
+
+function loadOnce($: EngineInterface, id: string, path: string, caption: string) {
+  const key = `${id}:${path}`
+  let pending = loaded.get(key)
+  if (!pending) {
+    pending = load($, path, caption).catch(() => null)
+    loaded.set(key, pending)
+  }
+  return pending
+}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.tool.register({
       name: TOOL_NAME,
       description:
-        '把一張本機圖片（PNG、JPEG、GIF、BMP、WebP、SVG）顯示給使用者：VS Code 與桌面版畫在這次工具呼叫的位置，並在有遠端控制時自動用 SendUserFile 傳一份到網頁版與手機，不用另外傳。VS Code 面板看不到 Markdown 圖片。產生了截圖、圖表等畫面要給使用者看時就呼叫，不用等使用者開口。圖片只顯示給使用者，你不會收到圖片內容；要自己看圖請用 Read。',
+        '只在本機顯示一張圖片（PNG、JPEG、GIF、BMP、WebP、SVG），畫在這次工具呼叫的位置，網頁版與手機收不到。有 SendUserFile 工具時請改用它，不要用這個：它傳的圖片也會畫在 VS Code 對話裡，網頁版與手機也收得到。只有沒有 SendUserFile（沒開遠端控制）時才用這個工具。VS Code 面板看不到 Markdown 圖片。圖片只顯示給使用者，你不會收到圖片內容；要自己看圖請用 Read。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -243,11 +240,10 @@ export const register: Register = on => {
     if (!path) return { deny: '缺少 path' }
     try {
       const shown = await load($, path, caption)
-      byCall.set(e.tool_use_id, Promise.resolve(shown))
+      loaded.set(`${e.tool_use_id}:${path}`, Promise.resolve(shown))
       $.ui.invalidate('ui.render')
-      const remote = await sendToRemote($, path, caption)
       const size = shown.width ? `，面板顯示尺寸 ${shown.width}x${shown.height}` : ''
-      return { result: `已顯示 ${path}${size}；${remote}` }
+      return { result: `已在本機顯示 ${path}${size}` }
     } catch (err) {
       return { deny: `無法顯示 ${path}：${messageOf(err)}` }
     }
@@ -270,24 +266,29 @@ export const register: Register = on => {
     }
   })
 
-  // 終端機沒有 Svg，留原本的工具列
+  // 終端機沒有 Svg，留原本的工具列；SendUserFile 只改 VS Code，桌面版有自己的預覽
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const { tool, tool_use_id: id, input, isRunning, isErrored } = e.props
-    if (tool !== TOOL || e.surface === 'terminal' || isRunning || isErrored) return next(e)
-    let pending = byCall.get(id)
-    if (!pending) {
-      const { path, caption } = readInput(input)
-      pending = load($, path, caption).catch(() => null)
-      byCall.set(id, pending)
-    }
-    const shown = await pending
-    if (!shown) return next(e)
+    if (e.surface === 'terminal' || isRunning || isErrored) return next(e)
+    const { path, caption, files } = readInput(input)
+    let paths: string[] = []
+    if (tool === TOOL) paths = [path]
+    else if (tool === SEND_FILE && e.surface === 'vscode') paths = files.filter(file => IMAGE_FILE.test(file))
+    if (paths.length === 0) return next(e)
+    const images = (await Promise.all(paths.map(file => loadOnce($, id, file, caption)))).filter(
+      (image): image is Shown => image !== null,
+    )
+    if (images.length === 0) return next(e)
     const { Box, Button, Text, Svg } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
-        {shown.caption !== '' && <Text dimColor>{shown.caption}</Text>}
-        <Svg source={shown.svg} alt={shown.caption || shown.path} />
-        <Button key="open" label="開啟原圖" onPress={() => void openOriginal($, shown.path)} />
+        {caption !== '' && <Text dimColor>{caption}</Text>}
+        {images.map(image => (
+          <Box flexDirection="column" key={image.path}>
+            <Svg source={image.svg} alt={caption || image.path} />
+            <Button key={`open:${image.path}`} label="開啟原圖" onPress={() => void openOriginal($, image.path)} />
+          </Box>
+        ))}
       </Box>
     )
   })
